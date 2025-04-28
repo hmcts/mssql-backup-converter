@@ -28,12 +28,12 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
       - run: |
-          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.prep.outputs.BUILD_ID }}"
+          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.prep.outputs.BUILD_ID }}
           docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.prep.outputs.BUILD_ID }}
         if: startsWith(github.ref, 'refs/pull')
         name: 'Build and publish image'
       - run: |
-          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}"
+          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}
           docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}
         if: github.ref == 'refs/heads/main'
         name: 'Build and publish image'

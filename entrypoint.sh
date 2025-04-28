@@ -1,0 +1,1 @@
+/opt/mssql/bin/sqlservr & ./create-bacpac.sh 

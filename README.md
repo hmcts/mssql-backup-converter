@@ -21,7 +21,7 @@ The SQL Package utility may run into issues converting databases with certain ty
 The example below assumes both your additional script and .bak file are in the same directory. These could be separated if desired.
 
 ```bash
-docker run --rm -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=asupersecurepassword -e Alexs_Database_EXEC=/mnt/external/my_sql_script.sql -v ~/Documents/Workspace/bak-to-bacpac-test:/mnt/external --name bak-to-bacpac mssql-backup-converter:latest
+docker run --rm -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=asupersecurepassword -e Alexs_Database_EXEC=/mnt/external/my_sql_script.sql -v ~/Documents/Workspace/bak-to-bacpac-test:/mnt/external --name bak-to-bacpac hmctspublic.azurecr.io/hmcts/mssql-backup-converter:latest
 ```
 
 ## How to import to Azure SQL

@@ -33,7 +33,8 @@ jobs:
         if: startsWith(github.ref, 'refs/pull')
         name: 'Build and publish PR image'
       - run: |
-          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}
+          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }} -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:latest
           docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/hmcts/mssql-backup-converter:latest
         if: github.ref == 'refs/heads/main'
         name: 'Build and publish production image'

@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/mssql/server:latest
+FROM mcr.microsoft.com/mssql/server:2022-CU18-ubuntu-22.04
 
 USER root
 

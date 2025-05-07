@@ -1,0 +1,138 @@
+trigger:
+  - main
+
+pool:
+  name: hmcts-sds-ptl
+
+variables:
+  ENVIRONMENT: STG  # Change to "PROD" if needed
+  SERVICE_CONNECTION: DTS-HERITAGE-INTSVC-STG
+  KEYVAULT_NAME: gaps2-kv-stg
+  AZURE_STORAGE_ACCOUNT: hmctsgaps2stgsftp
+  CONTAINER_NAME: ih-sftp
+  STORAGE_SECRET_NAME: hmctsgaps2stgsftp-primary-key-temp
+  SKIP_PIPELINE: "false"
+  SKIP_SQL_SETUP: "false"
+
+steps:
+  - task: AzureCLI@2
+    displayName: "Retrieve Storage Account Primary Key from Key Vault"
+    inputs:
+      azureSubscription: $(SERVICE_CONNECTION)
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        set -e
+        AZURE_STORAGE_KEY=$(az keyvault secret show --name $(STORAGE_SECRET_NAME) --vault-name $(KEYVAULT_NAME) --query value --output tsv | tr -d '\n')
+        if [[ -z "$AZURE_STORAGE_KEY" ]]; then
+          echo "❌ Storage account key retrieval failed, exiting..."
+          exit 1
+        fi
+        echo "##vso[task.setvariable variable=AZURE_STORAGE_KEY;]$AZURE_STORAGE_KEY"
+
+  - script: |
+      echo "Determining current year and month..."
+      CURRENT_YEAR=$(date +%Y)
+      CURRENT_MONTH=$(date +%m)
+      ADLS_DIR="$(ENVIRONMENT)/$CURRENT_YEAR/$CURRENT_MONTH"
+      echo "🔹 Checking ADLS directory: $ADLS_DIR"
+
+      # Find latest .bak file
+      LATEST_BAK_FILE=$(az storage blob list --account-name $(AZURE_STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+          --prefix "$ADLS_DIR" --query "sort_by(@, &properties.lastModified)[-1].name" --output tsv)
+
+      if [[ -z "$LATEST_BAK_FILE" ]]; then
+          echo "❌ No .bak file found, skipping pipeline."
+          echo "##vso[task.setvariable variable=SKIP_PIPELINE;]true"
+          exit 0
+      fi
+
+      echo "✅ Latest backup file found: $LATEST_BAK_FILE"
+      echo "##vso[task.setvariable variable=LATEST_BAK_FILE;]$LATEST_BAK_FILE"
+
+      # Extract only the filename from the full path
+      FILE_NAME=$(basename "$LATEST_BAK_FILE")
+      BACPAC_FILE_NAME="${FILE_NAME%.bak}.bacpac"
+      echo "##vso[task.setvariable variable=BACPAC_FILE_NAME;]$BACPAC_FILE_NAME"
+      echo "##vso[task.setvariable variable=FILE_NAME;]$FILE_NAME"
+
+      # Generate expected Bacpac name
+      EXPECTED_BACPAC_NAME="${LATEST_BAK_FILE%.bak}.bacpac"
+      echo "##vso[task.setvariable variable=EXPECTED_BACPAC_NAME;]$EXPECTED_BACPAC_NAME"
+
+      # Check if Bacpac already exists
+      EXISTING_BACPAC=$(az storage blob list --account-name $(AZURE_STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+          --prefix "$ADLS_DIR" --query "[?name=='$EXPECTED_BACPAC_NAME'].name" --output tsv)
+
+      if [[ -n "$EXISTING_BACPAC" ]]; then
+          echo "✅ Bacpac file already exists: $EXPECTED_BACPAC_NAME, skipping restore/export."
+          echo "##vso[task.setvariable variable=SKIP_PIPELINE;]true"
+          exit 0
+      fi
+    displayName: "Determine Latest .bak File & Validate .bacpac Existence"
+
+  - script: |
+      echo "Creating download directory..."
+      mkdir -p /mnt/external
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Ensure /mnt/external exists"
+
+  - script: |
+      echo "Downloading latest .bak file from Azure Storage..."
+      az storage blob download --account-name $(AZURE_STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+          --name "$LATEST_BAK_FILE" --file "/mnt/external/$FILE_NAME" --auth-mode key --account-key $(AZURE_STORAGE_KEY)
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Download Latest .bak File from Azure Storage"
+
+  - script: |
+      echo "Adding Microsoft SQL Server Repository for Ubuntu 22.04..."
+      curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+      cp /usr/share/keyrings/microsoft-prod.gpg /etc/apt/trusted.gpg.d/
+      curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2022.list | tee /etc/apt/sources.list.d/mssql-server-2022.list
+      apt update
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Configure SQL Server Repository"
+
+  - script: |
+      echo "Installing SQL Server..."
+      ACCEPT_EULA=Y apt install -y mssql-server
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Install SQL Server"
+
+  - script: |
+      echo "Installing sqlpackage..."
+      wget https://aka.ms/sqlpackage-linux -O sqlpackage.zip
+      unzip sqlpackage.zip -d /sqlpackage
+      chmod +x /sqlpackage/sqlpackage
+      echo 'export PATH="$PATH:/sqlpackage"' >> ~/.bashrc
+      source ~/.bashrc
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Install sqlpackage"
+
+  - script: |
+      echo "Setting MSSQL_SA_PASSWORD environment variable..."
+      echo "##vso[task.setvariable variable=ACCEPT_EULA;]Y"
+      echo "##vso[task.setvariable variable=MSSQL_SA_PASSWORD;]$(openssl rand -base64 16)"
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Generate & Set Environment Variables"
+
+  - script: |
+      echo "Starting SQL Server..."
+      nohup /opt/mssql/bin/sqlservr > /var/log/mssql-server.log 2>&1 &
+      sleep 10
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Start SQL Server"
+
+  - script: |
+      echo "Executing database restore and Bacpac export..."
+      chmod +x ./create-bacpac.sh
+      ./create-bacpac.sh "/opt/mssql-tools/bin/sqlcmd" "/sqlpackage/sqlpackage" "sql-scripts/" $(FILE_NAME)
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Run create-bacpac.sh"
+
+  - script: |
+      echo "Uploading .bacpac file back to Azure Storage..."
+      az storage blob upload --account-name $(AZURE_STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+          --file "/mnt/external/$(BACPAC_FILE_NAME)" --name "$(EXPECTED_BACPAC_NAME)" --auth-mode key --account-key $(AZURE_STORAGE_KEY)
+    condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+    displayName: "Upload Bacpac File to Azure Storage"

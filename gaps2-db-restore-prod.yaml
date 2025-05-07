@@ -1,0 +1,43 @@
+name: Gaps2 DB Restore PROD
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 2 * * *"
+    displayName: "Daily PROD Schedule"
+    branches:
+      include:
+        - main
+    always: true
+
+pool: 
+  name: hmcts-sds-ptl
+
+parameters:
+  - name: BAK_FILE_MANUAL
+    type: string
+    default: "null"
+    displayName: "Manually specify .bak file (optional)"
+  - name: RE_IMPORT_BACPAC
+    type: boolean
+    default: false
+    displayName: "Re-import existing .bacpac file (force overwrite)"
+
+variables:
+  SERVICE_CONNECTION: DTS-HERITAGE-INTSVC-PROD
+  KEYVAULT_NAME: gaps2-kv-prod
+  STORAGE_ACCOUNT: hmctsgaps2prodsftp
+  STORAGE_ACCOUNT_RESOURCE_GROUP: gaps2-prod-rg
+  STORAGE_SECRET_NAME: hmctsgaps2prodsftp-primary-key
+  SQL_SERVER: ss01-sqlsrv-prod.database.windows.net
+  SQL_CREDS_KEY_VAULT: smallsystems-kv-prod
+  SQL_CREDS_SECRET_NAME: ss01-sql-admin
+  CONTAINER_NAME: ih-sftp
+  GAPS_DB: ss-gaps2-sqldb
+  RE_IMPORT_BACPAC: ${{ parameters.RE_IMPORT_BACPAC }}
+
+jobs: 
+- template: db-restore-template.yaml
+  parameters:
+    BAK_FILE_MANUAL: ${{ parameters.BAK_FILE_MANUAL }}
+    RE_IMPORT_BACPAC: ${{ parameters.RE_IMPORT_BACPAC }}

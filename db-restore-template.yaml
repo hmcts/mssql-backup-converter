@@ -1,0 +1,277 @@
+parameters:
+  - name: BAK_FILE_MANUAL
+    type: string
+    default: "null"
+    displayName: "Manually specify .bak file (optional)"
+  - name: RE_IMPORT_BACPAC
+    type: boolean
+    default: false
+    displayName: "Re-import existing .bacpac file (force overwrite)"
+
+jobs: 
+- job: "Create_bacpac_and_restore_database"
+  timeoutInMinutes: 180
+  displayName: "Restore bak file to Azure SQL Database"
+  steps:
+    - task: AzureCLI@2
+      displayName: "Retrieve Storage Account & SQL Server Credentials from Key Vault"
+      inputs:
+        azureSubscription: $(SERVICE_CONNECTION)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          
+          # Retrieve Storage Account Key
+          AZURE_STORAGE_KEY=$(az keyvault secret show --name $(STORAGE_SECRET_NAME) --vault-name $(KEYVAULT_NAME) --query value --output tsv | tr -d '\n')
+          if [[ -z "$AZURE_STORAGE_KEY" ]]; then
+            echo "❌ Storage account key retrieval failed, exiting..."
+            exit 1
+          fi
+          echo "##vso[task.setvariable variable=AZURE_STORAGE_KEY;]$AZURE_STORAGE_KEY"
+
+          # Retrieve SQL Server Password (Key Vault only stores password)
+          SQL_PASSWORD=$(az keyvault secret show --name $(SQL_CREDS_SECRET_NAME) --vault-name $(SQL_CREDS_KEY_VAULT) --query value --output tsv | tr -d '\n')
+
+          if [[ -z "$SQL_PASSWORD" ]]; then
+            echo "❌ SQL Server password retrieval failed, exiting..."
+            exit 1
+          fi
+
+          # Set the user as SQL_CREDS_SECRET_NAME
+          SQL_USER="$(SQL_CREDS_SECRET_NAME)"
+
+          echo "✅ Retrieved SQL Server Credentials"
+          echo "##vso[task.setvariable variable=SQL_USER;]$SQL_USER"
+          echo "##vso[task.setvariable variable=SQL_PASSWORD;]$SQL_PASSWORD"
+
+    - script: |
+        echo "Testing connection to Azure SQL Server..."
+        
+        # Run SQL query to verify connectivity
+        /opt/mssql-tools/bin/sqlcmd -S "$(SQL_SERVER)" -U "$(SQL_USER)" -P '$(SQL_PASSWORD)' -d $(GAPS_DB) -Q "SELECT @@VERSION"
+        
+        if [[ $? -ne 0 ]]; then
+            echo "❌ SQL Server connection failed! Check credentials and firewall settings."
+            exit 1
+        fi
+        
+        echo "✅ Successfully connected to SQL Server!"
+
+        echo "🚀 Checking if database $(GAPS_DB) is empty..."
+
+        # Run SQL query and extract count
+        TABLE_COUNT=$(/opt/mssql-tools/bin/sqlcmd -S "$(SQL_SERVER)" -U "$(SQL_USER)" -P '$(SQL_PASSWORD)' -d "$(GAPS_DB)" -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0;" -h-1 -W | xargs)
+
+        echo "🔎 User tables count: $TABLE_COUNT"
+
+        if [[ "$TABLE_COUNT" -gt "0" ]]; then
+            echo "✅ Database $(GAPS_DB) contains user tables."
+            echo "##vso[task.setvariable variable=DB_IS_EMPTY]false"
+        else
+            echo "✅ Database $(GAPS_DB) is empty."
+            echo "##vso[task.setvariable variable=DB_IS_EMPTY]true"
+        fi
+      displayName: "Test Azure SQL Server Connection and check if its empty"
+
+    - script: |
+        echo "🚀 Checking for manually provided .bak file..."
+
+        if [[ "${{ parameters.BAK_FILE_MANUAL }}" != "null" ]]; then
+            echo "✅ Using manually specified .bak file: ${{ parameters.BAK_FILE_MANUAL }}"
+            LATEST_BAK_FILE="${{ parameters.BAK_FILE_MANUAL }}"
+            echo "##vso[task.setvariable variable=LATEST_BAK_FILE;]${{ parameters.BAK_FILE_MANUAL }}"
+        else
+            echo "🔹 No manual file provided, determining latest .bak file..."
+
+            CURRENT_YEAR=$(date +%Y)
+            CURRENT_MONTH=$(date +%m)
+            ADLS_DIR="$CURRENT_YEAR/$CURRENT_MONTH"
+            echo "🔹 Checking ADLS directory: $ADLS_DIR"
+
+            # Find latest .bak file
+            LATEST_BAK_FILE=$(az storage blob list --account-name $(STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+                --prefix "$ADLS_DIR" --query "[?ends_with(name, '.bak')]|sort_by(@, &properties.lastModified)[-1].name" \
+                --output tsv --auth-mode key --account-key $(AZURE_STORAGE_KEY))
+
+            if [[ -z "$LATEST_BAK_FILE" ]]; then
+                echo "❌ No .bak file found, skipping pipeline."
+                echo "##vso[task.setvariable variable=SKIP_PIPELINE;]true"
+                exit 0
+            fi
+
+            echo "✅ Latest backup file found: $LATEST_BAK_FILE"
+            echo "##vso[task.setvariable variable=LATEST_BAK_FILE;]$LATEST_BAK_FILE"
+        fi
+
+        FILE_NAME=$(basename "$LATEST_BAK_FILE")
+        BACPAC_FILE_NAME="${FILE_NAME%.bak}.bacpac"
+
+        echo "##vso[task.setvariable variable=BACPAC_FILE_NAME;]$BACPAC_FILE_NAME"
+        echo "##vso[task.setvariable variable=FILE_NAME;]$FILE_NAME"
+
+        EXPECTED_BACPAC_NAME="${LATEST_BAK_FILE%.bak}.bacpac"
+        echo "##vso[task.setvariable variable=EXPECTED_BACPAC_NAME;]$EXPECTED_BACPAC_NAME"
+
+        EXISTING_BACPAC_FILE=$(az storage blob list --account-name $(STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+            --prefix "$ADLS_DIR" --query "[?name=='$EXPECTED_BACPAC_NAME'].name" --output tsv --auth-mode key --account-key $(AZURE_STORAGE_KEY))
+
+        echo "##vso[task.setvariable variable=EXISTING_BACPAC_FILE;]$EXISTING_BACPAC_FILE"
+
+        if [[ -n "$EXISTING_BACPAC_FILE" ]]; then
+            echo "✅ Bacpac file already exists: $EXPECTED_BACPAC_NAME, skipping restore/export."
+            echo "##vso[task.setvariable variable=SKIP_PIPELINE;]true"
+            exit 0
+        fi
+      displayName: "Determine Latest .bak File or Use Manual Input"
+
+    - script: |
+        echo "Creating download directory..."
+        mkdir -p /mnt/external
+      displayName: "Ensure /mnt/external exists"
+
+    - script: |
+        echo "Downloading .bak file from Azure Storage..."
+        az storage blob download --account-name $(STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+            --name "$LATEST_BAK_FILE" --file "/mnt/external/$FILE_NAME" --auth-mode key --account-key $(AZURE_STORAGE_KEY)
+      condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+      displayName: "Download .bak File from Azure Storage"
+
+    - script: |
+        echo "Downloading .bacpac file from Azure Storage..."
+        az storage blob download --account-name $(STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+            --name "$EXISTING_BACPAC_FILE" --file "/mnt/external/$(BACPAC_FILE_NAME)" --auth-mode key --account-key $(AZURE_STORAGE_KEY)
+      condition: and(succeeded(), eq(variables['SKIP_PIPELINE'], 'true'), eq(variables['RE_IMPORT_BACPAC'], 'true'))
+      displayName: "Download .bacpac File from Azure Storage"
+
+    - script: |
+        echo "Adding Microsoft SQL Server Repository"
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+        cp /usr/share/keyrings/microsoft-prod.gpg /etc/apt/trusted.gpg.d/
+        curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2022.list | tee /etc/apt/sources.list.d/mssql-server-2022.list
+        apt update
+        echo "Installing SQL Server..."
+        ACCEPT_EULA=Y apt install -y mssql-server
+      condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+      displayName: "Install SQL Server"
+
+    - script: |
+        echo "Installing sqlpackage..."
+        wget https://aka.ms/sqlpackage-linux -O sqlpackage.zip
+        unzip sqlpackage.zip -d /sqlpackage
+        chmod +x /sqlpackage/sqlpackage
+        echo 'export PATH="$PATH:/sqlpackage"' >> ~/.bashrc
+        source ~/.bashrc
+      condition: and(succeeded(), or(eq(variables['RE_IMPORT_BACPAC'], 'true'), ne(variables['SKIP_PIPELINE'], 'true')))
+      displayName: "Install sqlpackage"
+
+    - script: |
+        echo "Setting MSSQL_SA_PASSWORD and CONNECTION_STRING environment variable..."
+        CONNECTION_STRING='Server=tcp:$(SQL_SERVER),1433;Initial Catalog=$(GAPS_DB);Persist Security Info=False;User ID=$(SQL_USER);Password=$(SQL_PASSWORD);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30'
+        echo "##vso[task.setvariable variable=ACCEPT_EULA;]Y"
+        echo "##vso[task.setvariable variable=MSSQL_SA_PASSWORD;]$(openssl rand -base64 16)"
+        echo "##vso[task.setvariable variable=SQL_CONNECTION_STRING;]$CONNECTION_STRING"
+      condition: and(succeeded(), or(eq(variables['RE_IMPORT_BACPAC'], 'true'), ne(variables['SKIP_PIPELINE'], 'true')))
+      displayName: "Generate & Set Environment Variables"
+
+    - script: |
+        echo "Starting SQL Server..."
+        nohup /opt/mssql/bin/sqlservr > /var/log/mssql-server.log 2>&1 &
+        sleep 10
+      condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+      displayName: "Start SQL Server"
+
+    - script: |
+        echo "Executing database restore and Bacpac export..."
+        chmod +x ./create-bacpac.sh
+        ./create-bacpac.sh "/opt/mssql-tools/bin/sqlcmd" "/sqlpackage/sqlpackage" "sql-scripts/" $(FILE_NAME)
+      condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+      displayName: "Run create-bacpac.sh"
+
+    - script: |
+        echo "Uploading .bacpac file back to Azure Storage..."
+        az storage blob upload --account-name $(STORAGE_ACCOUNT) --container-name $(CONTAINER_NAME) \
+            --file "/mnt/external/$(BACPAC_FILE_NAME)" --name "$(EXPECTED_BACPAC_NAME)" --auth-mode key --account-key $(AZURE_STORAGE_KEY)
+      condition: and(succeeded(), ne(variables['SKIP_PIPELINE'], 'true'))
+      displayName: "Upload Bacpac File to Azure Storage"
+
+    - script: |
+          echo "🚀 Deleting all objects from database $(GAPS_DB)..."
+
+          /opt/mssql-tools/bin/sqlcmd -S "$(SQL_SERVER)" -U "$(SQL_USER)" -P '$(SQL_PASSWORD)' -d "$(GAPS_DB)" -Q "
+          SET QUOTED_IDENTIFIER ON;
+
+          DECLARE @sql NVARCHAR(MAX);
+          
+          -- 🚀 Drop Views First (prevents dependencies blocking table deletion)
+          SET @sql = N'';
+          SELECT @sql = 
+            (SELECT 'DROP VIEW [' + name + ']; ' 
+            FROM sys.views 
+            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)');
+          EXEC sp_executesql @sql;
+
+          -- 🚀 Drop Foreign Key Constraints
+          SET @sql = N'';
+          SELECT @sql += 'ALTER TABLE [' + t.name + '] DROP CONSTRAINT [' + fk.name + ']; '
+          FROM sys.foreign_keys fk
+          JOIN sys.tables t ON fk.parent_object_id = t.object_id;
+          EXEC sp_executesql @sql;
+
+          -- 🚀 Drop Tables
+          SET @sql = N'';
+          SELECT @sql = 
+            (SELECT 'DROP TABLE [' + name + ']; ' 
+            FROM sys.tables 
+            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)');
+          EXEC sp_executesql @sql;
+
+          -- 🚀 Drop Stored Procedures
+          SET @sql = N'';
+          SELECT @sql = 
+            (SELECT 'IF EXISTS (SELECT 1 FROM sys.procedures WHERE object_id = OBJECT_ID(N''' + name + ''')) DROP PROCEDURE [' + name + ']; ' 
+            FROM sys.procedures 
+            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)');
+          EXEC sp_executesql @sql;
+
+          -- 🚀 Drop Functions
+          SET @sql = N'';
+          SELECT @sql = 
+            (SELECT 'IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N''' + name + ''') AND type IN (''FN'', ''TF'', ''IF'')) DROP FUNCTION [' + name + ']; ' 
+            FROM sys.objects WHERE type IN ('FN', 'TF', 'IF') 
+            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)');
+          EXEC sp_executesql @sql;
+
+          PRINT N'✅ All user objects successfully deleted!';
+          "
+
+          if [[ $? -ne 0 ]]; then
+              echo "❌ Failed to delete database objects!"
+              exit 1
+          fi
+              
+          echo "✅ Successfully deleted all objects from database $(GAPS_DB)!"
+      condition: and(succeeded(), or(eq(variables['RE_IMPORT_BACPAC'], 'true'), ne(variables['SKIP_PIPELINE'], 'true')))
+      displayName: "Delete All Objects from Database Before Restore"
+
+    - script: |
+        echo "🚀 Importing Bacpac file $(BACPAC_FILE_NAME) into database $(GAPS_DB) using sqlpackage..."
+
+        # Validate Bacpac file exists
+        if [ ! -f "/mnt/external/$(BACPAC_FILE_NAME)" ]; then
+            echo "❌ Bacpac file not found: /mnt/external/$(BACPAC_FILE_NAME)"
+            exit 1
+        fi
+
+        /sqlpackage/sqlpackage /Action:Import \
+          /SourceFile:"/mnt/external/$(BACPAC_FILE_NAME)" \
+          /TargetConnectionString:'$(SQL_CONNECTION_STRING)'
+
+        if [[ $? -ne 0 ]]; then
+            echo "❌ Bacpac import failed!"
+            exit 1
+        fi
+
+        echo "✅ Successfully imported Bacpac file into $(GAPS_DB)!"
+      condition: and(succeeded(), or(eq(variables['RE_IMPORT_BACPAC'], 'true'), ne(variables['SKIP_PIPELINE'], 'true')))
+      displayName: "Import Bacpac to Azure SQL Database Using sqlpackage"

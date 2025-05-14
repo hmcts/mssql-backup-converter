@@ -46,3 +46,35 @@ az sql db import -s your_sql_server -n your_database_name -g your_resource_group
 --storage-key-type SharedAccessKey \
 --storage-uri https://your_storage_account.blob.core.windows.net/your_container_name/your_backup.bacpac
 ```
+
+## 🚀 ADO Pipeline  
+
+This pipeline automates **backup restoration** and **Bacpac export** from `.bak` files stored in **Azure Storage**. It **converts a `.bak` file to `.bacpac`** and imports it into the database. **Every time the pipeline imports, all existing database objects are overwritten.**  
+
+The pipeline **automatically detects new `.bak` files** that haven’t been converted into `.bacpac` yet. If a corresponding `.bacpac` file already exists, the pipeline **skips the import step** to avoid unnecessary processing.  
+
+There are **two separate pipelines** available in **Azure DevOps**:  
+✅ **Gaps2 DB Restore STG** (Staging environment)  
+✅ **Gaps2 DB Restore PROD** (Production environment)  
+
+---
+
+### 📌 Pipeline Triggers  
+
+The pipeline currently runs **on a cron schedule** and can also be **manually triggered**.  
+
+#### 🕒 **Scheduled (Cron) Execution**
+Runs **automatically** on a defined schedule to detect and process new `.bak` files.  
+
+#### ✋ **Manual Execution**  
+Users can manually **trigger the pipeline for immediate execution**.
+
+#### **Manual Parameters**  
+- **`BAK_FILE_MANUAL`** → Provide the **exact path to a `.bak` file** on the storage account *(e.g., `"2025/05/ss-gaps2-sqldb-09.bak"`)*.  
+- **`RE_IMPORT_BACPAC`** → If `true`, the pipeline **skips restoring from `.bak`** and instead **re-imports an existing Bacpac file** to overwrite the database.  
+
+#### 🔹 **Behavior for Manual Triggers**
+- If **default parameters** are used, the system **automatically detects any new `.bak` file** that hasn't been processed and imports it.  
+- If **`BAK_FILE_MANUAL`** is specified, the pipeline **uses the provided path to restore that specific backup**.  
+- If **a Bacpac file has already been generated**, you can **bypass the `.bak` restore process** by setting **`RE_IMPORT_BACPAC=true`**, ensuring the existing Bacpac is **re-imported to overwrite the database**.  
+

@@ -263,7 +263,7 @@ jobs:
             exit 1
         fi
 
-        /sqlpackage/sqlpackage /Action:Import \
+        /sqlpackage/sqlpackage /Action:Import /Quiet:True \
           /SourceFile:"/mnt/external/$(BACPAC_FILE_NAME)" \
           /TargetConnectionString:'$(SQL_CONNECTION_STRING)'
 

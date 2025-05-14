@@ -94,7 +94,7 @@ echo "✅ Cleanup completed, proceeding with Bacpac export..."
 
 # Run SQLPackage export
 echo "🔹 Exporting Database to Bacpac: $BACPAC_FILE..."
-$SQLPACKAGE_PATH /Action:"Export" /TargetFile:"$BACPAC_FILE" \
+$SQLPACKAGE_PATH /Action:"Export" /TargetFile:"$BACPAC_FILE" /Quiet:True \
   /SourceConnectionString:"Data Source=localhost;Initial Catalog=$DB_NAME;User ID=sa;Password=$MSSQL_SA_PASSWORD;TrustServerCertificate=True"
 
 if [ $? -ne 0 ]; then

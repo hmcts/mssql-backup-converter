@@ -46,6 +46,25 @@ jobs:
           echo "##vso[task.setvariable variable=SQL_PASSWORD;]$SQL_PASSWORD"
 
     - script: |
+        echo "Installing SQL Server command-line tools..."
+        
+        # Add Microsoft repository
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+        cp /usr/share/keyrings/microsoft-prod.gpg /etc/apt/trusted.gpg.d/
+        echo "deb [arch=amd64,arm64,armhf signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | tee /etc/apt/sources.list.d/mssql-release.list
+        
+        # Update package list and install tools
+        apt-get update
+        ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
+        
+        # Add to PATH
+        echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+        export PATH="$PATH:/opt/mssql-tools/bin"
+        
+        echo "✅ SQL Server tools installed successfully"
+      displayName: "Install SQL Server Command-Line Tools"
+
+    - script: |
         echo "Testing connection to Azure SQL Server..."
         
         # Run SQL query to verify connectivity

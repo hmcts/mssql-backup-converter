@@ -1,13 +1,13 @@
 on:
   push:
     branches:
-      - master
+      - main
     paths:
       - 'main/**'
       - '.github/workflows/main.yml'
   pull_request:
     branches:
-      - master
+      - main
     paths:
       - 'main/**'
       - '.github/workflows/main.yml'
@@ -32,23 +32,9 @@ jobs:
       - name: 'Az CLI login'
         uses: azure/login@v2
         with:
-          client-id: b354d443-d632-4d61-8ee8-2abc2c7baf23 # DTS Platform Operations GitHub Actions ACR Publisher 1
+          client-id: b354d443-d632-4d61-8ee8-2abc2c7baf23 # DTS Shared GitHub Actions ACR Publisher 1
           tenant-id: 531ff96d-0ae9-462a-8d2d-bec7c0b42082 # HMCTS.NET
           allow-no-subscriptions: true
-
-      - name: "Get Short Sha Hash"
-        id: get-short-sha
-        uses: actions/github-script@v8.0.0
-        with:
-          script: |
-            const shortSha = context.sha.substring(0, 7)
-            core.setOutput('shortSha', shortSha)
-
-      - name: 'Get Commit Timestamp'
-        id: get-timestamp
-        run: |
-          TIMESTAMP=$(git log -1 --format='%cI' | sed -e's/[-T:]//g' -e's/+.*$//g')
-          echo "::set-output name=timestamp::$TIMESTAMP"
 
       - name: 'ACR Login'
         run: |
@@ -58,14 +44,15 @@ jobs:
       - name: 'Build and push PR image'
         if: startsWith(github.ref, 'refs/pull')
         run: |
-          docker build . -t hmctsprod.azurecr.io/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.get-short-sha.outputs.shortSha }}
-          docker push hmctsprod.azurecr.io/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.get-short-sha.outputs.shortSha }}
+          docker build . -t hmctsprod.azurecr.io/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.prep.outputs.BUILD_ID }}
+          docker push hmctsprod.azurecr.io/hmcts/mssql-backup-converter:pr-${{github.event.number}}-${{ steps.prep.outputs.BUILD_ID }}
 
       - name: 'Build and push prod image'
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/main'
         run: |
-          docker build . -t hmctsprod.azurecr.io/hmcts/mssql-backup-converter:prod-${{ steps.get-short-sha.outputs.shortSha }}-${{ steps.get-timestamp.outputs.timestamp }}
-          docker push hmctsprod.azurecr.io/hmcts/mssql-backup-converter:prod-${{ steps.get-short-sha.outputs.shortSha }}-${{ steps.get-timestamp.outputs.timestamp }}
+          docker build . -t hmctsprod.azurecr.io/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}-${{ steps.get-timestamp.outputs.timestamp }}
+          docker push hmctsprod.azurecr.io/hmcts/mssql-backup-converter:prod-${{ steps.prep.outputs.BUILD_ID }}
+          docker push hmctsprod.azurecr.io/hmcts/mssql-backup-converter:latest
 
       # HMCTSPUBLIC ACR - to be deprecated post migration to hmctsprod
       - name: 'Docker Login'
